@@ -1,0 +1,13 @@
+__pycache__
+homes
+mail
+msr
+online
+web
+webmail
+webresearch
+webusers
+*.gz
+download_all_subtraces*.sh
+run_trace
+*output.txt
