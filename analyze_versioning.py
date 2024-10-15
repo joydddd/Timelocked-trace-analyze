@@ -66,7 +66,7 @@ def clear_expired_blocks(versioning_blocks, expired_time, block_id):
         expired_count = old_copy_count - len(versioning_blocks[block_id])
     return expired_count
 
-def execute_trace(trace, lock_win, expire_win, accessed_blocks, written_blocks, cached_blocks, versioning_blocks, last_epoch_time, versioning_block_count, f_disk_usage_trend):
+def execute_trace(trace, lock_win, expire_win, accessed_blocks, written_blocks, cached_blocks, versioning_blocks, last_epoch_time, versioning_block_count, w_count, f_disk_usage_trend):
     trend_checkpoint_time = datetime.timedelta(minutes=30)
     last_checkpoint = datetime.datetime.min
     
@@ -80,6 +80,7 @@ def execute_trace(trace, lock_win, expire_win, accessed_blocks, written_blocks, 
                 accessed_blocks.add(id)
             elif command == "W":
                 written_blocks.add(id)
+                w_count += 1
             else:
                 print("Invalid command")
             
@@ -96,10 +97,12 @@ def execute_trace(trace, lock_win, expire_win, accessed_blocks, written_blocks, 
                 f"Accessed: {block_number_to_GB(len(accessed_blocks)):.2f} GB ",
                 f"Written {block_number_to_GB(len(written_blocks)):.2f} GB ",
                 f"vs Versioning {block_number_to_GB(versioning_block_count):.2f} GB ",
-                f"+ {block_number_to_GB(len(cached_blocks)):.2f} GB "
+                f"+ cache {block_number_to_GB(len(cached_blocks)):.2f} GB "
+                f"versioning meta {block_number_to_GB(w_count)/512.0:.2f} GB "
             )
-            f_disk_usage_trend.write(str((time.strftime("%Y-%m-%d %H:%M:%S"), len(accessed_blocks), len(written_blocks), versioning_block_count+len(cached_blocks))) + "\n")
+            f_disk_usage_trend.write(str((time.strftime("%Y-%m-%d %H:%M:%S"), len(accessed_blocks), len(written_blocks), versioning_block_count+len(cached_blocks), w_count)) + "\n")
             last_checkpoint = time
+    return w_count, versioning_block_count
 
 
 
@@ -113,6 +116,7 @@ def analyze_disk_usage(traces_filesname, lock_window, expire_window):
     
     last_epoch_time = start_time
     versioning_block_count = 0
+    w_count = 0
     
     import re
     trend_filename = re.sub('\.time.bin$', '', traces_filesname[0])
@@ -122,10 +126,18 @@ def analyze_disk_usage(traces_filesname, lock_window, expire_window):
         for filename in traces_filesname:
             with open(filename, 'rb') as file:
                 traces = pickle.load(file)
-                execute_trace(traces, lock_window, expire_window, accessed_blocks, written_blocks, cached_blocks, versioning_blocks, last_epoch_time, versioning_block_count, f_disk_usage_trend)
+                w_count, versioning_block_count = execute_trace(traces, lock_window, expire_window, accessed_blocks, written_blocks, cached_blocks, versioning_blocks, last_epoch_time, versioning_block_count, w_count, f_disk_usage_trend)
     print("Written to " + trend_filename)
 
 
+blue0 = '#045275'
+blue1 = '#089099'
+green = '#7ccba2'
+yellow = '#fcde9c'
+orange = '#f0746e'
+red = '#dc3977'
+purple = '#7c1d6f'
+grey = '#e3e3e3'
 
 def parse_line(line):
     start_time = datetime.datetime(year=2000, month=1, day=1)
@@ -137,11 +149,12 @@ def parse_line(line):
     read_only_blocks = int(parts[1])
     written_blocks = int(parts[2])
     versioning_blocks = int(parts[3])
+    w_blocks = int(parts[4])
     
     versioning_overhead = versioning_blocks - written_blocks
-    return time, read_only_blocks, written_blocks, versioning_overhead
+    return time, read_only_blocks, written_blocks, versioning_overhead, w_blocks
 
-def plot_blocks_over_time(filename, logic_disk_usage_GB):
+def plot_blocks_over_time(filename, logic_disk_usage_GB, plot_FS_size=True):
     # Step 1: Read and parse the data from the file
     with open(filename, 'r') as file:
         lines = file.readlines()
@@ -149,7 +162,7 @@ def plot_blocks_over_time(filename, logic_disk_usage_GB):
     data = [parse_line(line) for line in lines]
     
     # Step 2: Convert the data into a pandas DataFrame
-    df = pd.DataFrame(data, columns=['time', 'read_only_blocks', 'written_blocks', 'versioning_overhead'])
+    df = pd.DataFrame(data, columns=['time', 'read_only_blocks', 'written_blocks', 'versioning_overhead', 'w_blocks'])
     
     # Step 3: Convert the data to GB if necessary
     # Assuming the data is in bytes, convert to GB
@@ -157,27 +170,53 @@ def plot_blocks_over_time(filename, logic_disk_usage_GB):
     df['written_GB'] = block_number_to_GB(df['written_blocks'])
     df['not_touched_GB'] = [logic_disk_usage_GB - block_number_to_GB(r + w) for r, w in zip(df['read_only_blocks'], df['written_blocks'])]
     df['versioning_GB'] = block_number_to_GB(df['versioning_overhead'])
+    df['tl_metadata_GB'] = [logic_disk_usage_GB / 512.0] * len(df['read_only_blocks'])
+    df['versioning_meta_GB'] = block_number_to_GB(df['w_blocks']) / 512.0
     
     
     print("written GB: ", df['written_GB'].iloc[-1])
     print("read GB: ", df['readonly_GB'].iloc[-1])
-    print("versioning_overhead GB: ", df['versioning_GB'].iloc[-1])
-    print("Logic Space GB: ", logic_disk_usage_GB)
+    print("old versions GB: ", df.max()['versioning_GB'])
+    print("TL Metadata GB: ", logic_disk_usage_GB / 512.0)
+    print("Versioning Metadata GB: ", df.max()['versioning_meta_GB'])
+    print("filesystem size GB: ", logic_disk_usage_GB)
     
     # Step 4: Plot the data using a stacked area plot
     plt.figure(figsize=(10, 6))
-    plt.stackplot(df['time'], 
-                  df['readonly_GB'], 
-                  df['written_GB'], 
-                  df['not_touched_GB'],
-                  df['versioning_GB'], 
-                  labels=['Read', 'Write', 'Logic Space', 'Versioning Overhead'])
+    if plot_FS_size:
+        plt.stackplot(df['time'], 
+                    df['readonly_GB'], 
+                    df['written_GB'], 
+                    df['not_touched_GB'],
+                    df['tl_metadata_GB'],
+                    df['versioning_meta_GB'],
+                    df['versioning_GB'], 
+                    labels=['Read Only', 'Dirty', 'Untouch Filesystem', 'TL MetaData',  'Versioning MetaData', 'Old Versions'],
+                    colors=[blue0, green, grey, purple, red, yellow])
+    else:
+        plt.stackplot(df['time'], 
+                    df['readonly_GB'], 
+                    df['written_GB'], 
+                    df['tl_metadata_GB'],
+                    df['versioning_meta_GB'],
+                    df['versioning_GB'], 
+                    labels=['Read Only', 'Dirty', 'TL MetaData', 'Versioning MetaData', 'Old Versions'],
+                    colors=[blue0, green, purple, red, yellow])
     
     # Step 5: Add labels and legend
     plt.xlabel('Time')
     plt.ylabel('Blocks in GB')
-    plt.title('Readonly, Written, and Versioning Disk Usage Over Time: ' + filename)
+    plt.title('Disk Usage Over Time: ' + filename)
     plt.legend(loc='upper left')
     
     # Step 6: Show the plot
     plt.show()
+
+def main():
+    import sys
+    mail_bins = sys.argv[1:]
+    print("Running bins", mail_bins)
+    analyze_disk_usage(mail_bins, datetime.timedelta(hours=0), datetime.timedelta(days=2))
+
+if __name__ == "__main__":
+    main()
